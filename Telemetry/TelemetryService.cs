@@ -1,4 +1,5 @@
 using AcBridge.Models;
+using AcBridge.Telemetry.CarData;
 
 namespace AcBridge.Telemetry;
 
@@ -13,6 +14,8 @@ public sealed class TelemetryOptions
     public int MaxStreamHz { get; set; } = 60;
     /// <summary>Anzahl Minisektoren pro Runde.</summary>
     public int MiniSectors { get; set; } = 45;
+    /// <summary>AC-Installationsordner. Leer = automatisch (laufendes acs.exe, sonst Steam-Standardpfad).</summary>
+    public string? AcRoot { get; set; }
 }
 
 /// <summary>
@@ -63,6 +66,7 @@ public sealed class TelemetryPoller(
     IFieldSource fieldSource,
     TelemetryStore store,
     TelemetryOptions options,
+    CarDataService carData,
     ILogger<TelemetryPoller> log) : BackgroundService
 {
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
@@ -82,8 +86,12 @@ public sealed class TelemetryPoller(
         var lastChange = DateTime.UtcNow;
         var field = new FieldTracker(options.MiniSectors);
         var miniSectors = new MiniSectorTracker(options.MiniSectors) { Field = field };
+        var sectors = new SectorTracker(3);
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var fieldWasActive = false;
+        string? lastCompound = null;
+        CarPhysics? lastPhysics = null;
+        int? compoundIndex = null;
 
         while (!ct.IsCancellationRequested)
         {
@@ -105,8 +113,15 @@ public sealed class TelemetryPoller(
                 {
                     lastStaticRead = DateTime.UtcNow;
                     var st = source.ReadStatic();
-                    var changed = store.SetSession(st is { } s && !string.IsNullOrEmpty(s.CarModel) ? AcMapper.ToSession(s) : null);
-                    if (changed) { miniSectors.Reset(); field.Reset(); }   // anderes Auto / andere Strecke → neu
+                    var changed = store.SetSession(st is { } s && !string.IsNullOrEmpty(s.CarModel)
+                        ? AcMapper.ToSession(s, carData.Get(s.CarModel))
+                        : null);
+                    if (changed)
+                    {
+                        miniSectors.Reset();
+                        field.Reset();
+                        sectors = new SectorTracker(store.Session?.SectorCount is > 0 and var n ? n : 3);
+                    }   // anderes Auto / andere Strecke → neu
                 }
 
                 if (source.ReadFrame() is { } raw && raw.Physics.PacketId != lastPacket)
@@ -121,7 +136,15 @@ public sealed class TelemetryPoller(
                         else log.LogInformation("Solo-Modus");
                     }
                     var mini = miniSectors.Update(raw);
-                    store.Publish(AcMapper.ToFrame(raw, ++seq, mini));
+                    var sectorData = sectors.Update(raw);
+                    var compound = raw.Graphics.TyreCompound;
+                    if (compound != lastCompound || store.Session?.CarPhysics != lastPhysics)
+                    {
+                        lastCompound = compound;
+                        lastPhysics = store.Session?.CarPhysics;
+                        compoundIndex = CarDataService.FindCompound(lastPhysics, compound);
+                    }
+                    store.Publish(AcMapper.ToFrame(raw, ++seq, mini, sectorData, sectors.BestLapMs, compoundIndex));
                 }
                 else if (DateTime.UtcNow - lastChange > StaleAfter)
                 {

@@ -4,7 +4,7 @@ namespace AcBridge.Telemetry;
 
 public static class AcMapper
 {
-    public static TelemetryFrame ToFrame(RawSnapshot s, long seq, MiniSectorData miniSectors)
+    public static TelemetryFrame ToFrame(RawSnapshot s, long seq, MiniSectorData miniSectors, SectorData sectors, int? ownBestLapMs, int? compoundIndex)
     {
         var p = s.Physics;
         var g = s.Graphics;
@@ -41,7 +41,8 @@ public static class AcMapper
                 Wear: Wheels.From(p.TyreWear),
                 Slip: Wheels.From(p.WheelSlip),
                 Load: Wheels.From(p.WheelLoad),
-                Compound: g.TyreCompound ?? ""),
+                Compound: g.TyreCompound ?? "",
+                CompoundIndex: compoundIndex),
             BrakeTemp: Wheels.From(p.BrakeTemp),
             SuspensionTravel: Wheels.From(p.SuspensionTravel),
             Lap: new LapData(
@@ -49,7 +50,7 @@ public static class AcMapper
                 Position: g.Position,
                 CurrentLapMs: g.ICurrentTime,
                 LastLapMs: g.ILastTime,
-                BestLapMs: g.IBestTime,
+                BestLapMs: g.IBestTime > 0 ? g.IBestTime : ownBestLapMs ?? 0,
                 CurrentSector: g.CurrentSectorIndex,
                 LastSectorMs: g.LastSectorTime,
                 NumberOfLaps: g.NumberOfLaps,
@@ -63,10 +64,11 @@ public static class AcMapper
             RoadTemp: p.RoadTemp,
             SurfaceGrip: g.SurfaceGrip,
             CarDamage: p.CarDamage ?? new float[5],
-            MiniSectors: miniSectors);
+            MiniSectors: miniSectors,
+            Sectors: sectors);
     }
 
-    public static SessionInfo ToSession(AcStatic s) => new(
+    public static SessionInfo ToSession(AcStatic s, CarPhysics? carPhysics) => new(
         AcVersion: s.AcVersion ?? "",
         SmVersion: s.SmVersion ?? "",
         Car: s.CarModel ?? "",
@@ -87,5 +89,6 @@ public static class AcMapper
         IsTimedRace: s.IsTimedRace != 0,
         FuelRate: s.AidFuelRate,
         TyreRate: s.AidTireRate,
-        DamageRate: s.AidMechanicalDamage);
+        DamageRate: s.AidMechanicalDamage,
+        CarPhysics: carPhysics);
 }

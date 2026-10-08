@@ -1,5 +1,6 @@
 using AcBridge;
 using AcBridge.Telemetry;
+using AcBridge.Telemetry.CarData;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +18,11 @@ IFieldSource fieldSource = source switch
     _ => new NoFieldSource(),
 };
 builder.Services.AddSingleton(fieldSource);
+builder.Services.AddSingleton(sp => new CarDataService(options, sp.GetRequiredService<ILogger<CarDataService>>())
+{
+    // Mock: Werte der RSS Formula Hybrid 2020, damit die App auch ohne AC-Dateien Fenster bekommt
+    Fallback = source is MockTelemetrySource ? MockCarData.Physics : null,
+});
 builder.Services.AddHostedService<TelemetryPoller>();
 
 // Offen für ein späteres Angular-Dashboard im LAN
@@ -41,8 +47,12 @@ api.MapGet("/session", (TelemetryStore store) =>
 api.MapGet("/telemetry", (TelemetryStore store) =>
     store.Latest is { } f ? Results.Ok(f) : Results.NoContent());
 
+// Temperaturfenster eines beliebigen Autos (zum Nachschauen/Debuggen), z. B. /api/car/rss_formula_hybrid_2020
+api.MapGet("/car/{car}", (string car, CarDataService carData) =>
+    carData.Get(car) is { } c ? Results.Ok(c) : Results.NotFound());
+
 app.MapGet("/", () => Results.Text(
-    "AC Bridge läuft.\n\nLIVE /live   (Testseite im Browser)\nWS   /ws/telemetry?hz=30\nGET  /api/status\nGET  /api/session\nGET  /api/telemetry\n"));
+    "AC Bridge läuft.\n\nLIVE /live   (Testseite im Browser)\nWS   /ws/telemetry?hz=30\nGET  /api/status\nGET  /api/session\nGET  /api/telemetry\nGET  /api/car/{auto}\n"));
 
 app.MapGet("/live", () => Results.Content(LivePage.Html, "text/html; charset=utf-8"));
 
