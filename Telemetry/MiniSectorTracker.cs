@@ -222,7 +222,6 @@ public sealed class MiniSectorTracker(int count)
             Current: current,
             Results: (string[])_results.Clone(),
             LastLapResults: _lastLapResults,
-            ReferenceLapMs: _bestLap is null ? null : (int)Math.Round(_bestLap[_count]),
             LapValid: _lapValid,
             Mode: FieldMode ? "field" : "solo",
             FieldCars: Field?.OpponentCount ?? 0);

@@ -1,3 +1,4 @@
+using AcBridge.Models;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -77,6 +78,26 @@ public sealed class AcSharedMemorySource : ITelemetrySource
 /// Fake-Daten: ein Auto fährt Runden auf einer ~4 km Strecke.
 /// Damit kannst du am Mac/iPad das Frontend bauen, ohne dass AC läuft.
 /// </summary>
+/// <summary>Autodaten für den Mock (Werte aus der data.acd der RSS Formula Hybrid 2020).</summary>
+public static class MockCarData
+{
+    private static TyreCompoundInfo Compound(int i, string name, string shortName, int peak) =>
+        new(i, name, shortName,
+            Front: new TempWindow(peak, peak - 10, peak + 10, peak - 22, peak + 22),
+            Rear: new TempWindow(peak, peak - 10, peak + 10, peak - 22, peak + 22),
+            IdealPressureFront: 22, IdealPressureRear: 22);
+
+    public static readonly CarPhysics Physics = new(
+        [
+            Compound(0, "UltraSoft", "C5", 85),
+            Compound(1, "SuperSoft", "C4", 95),
+            Compound(2, "Soft", "C3", 105),
+            Compound(3, "Medium", "C2", 115),
+            Compound(4, "Hard", "C1", 125),
+        ],
+        new BrakeWindows(new TempWindow(550, 400, 700, 270, 900), new TempWindow(550, 400, 700, 270, 900)));
+}
+
 public sealed class MockTelemetrySource : ITelemetrySource
 {
     private const float TrackLength = 4000f;
@@ -136,17 +157,18 @@ public sealed class MockTelemetrySource : ITelemetrySource
             AccG = [1.8f * MathF.Sin(pos * MathF.PI * 6 + 1.5f), 1f, 1.2f * accel],
             WheelSlip = Four(0.05f, 0.04f),
             WheelLoad = Four(3500, 600),
-            WheelsPressure = Four(27.5f, 0.6f),
+            WheelsPressure = Four(22f, 0.6f),
             WheelAngularSpeed = new float[4],
             TyreWear = Four(98f - _laps * 0.4f, 0.2f),
             TyreDirtyLevel = new float[4],
-            TyreCoreTemperature = Four(85, 6),
-            TyreTempI = Four(92, 7),
-            TyreTempM = Four(86, 6),
-            TyreTempO = Four(80, 6),
+            // um das C1-Fenster (111–139 °C) herum, damit alle Farben vorkommen
+            TyreCoreTemperature = Four(120, 18),
+            TyreTempI = Four(127, 18),
+            TyreTempM = Four(121, 18),
+            TyreTempO = Four(115, 18),
             CamberRad = new float[4],
             SuspensionTravel = Four(0.04f, 0.015f),
-            BrakeTemp = Four(350 + 250 * MathF.Max(0, -accel), 20),
+            BrakeTemp = Four(300 + 500 * MathF.Max(0, -accel), 20),
             CarDamage = new float[5],
             RideHeight = new float[2],
             LocalAngularVelocity = new float[3],
@@ -155,6 +177,8 @@ public sealed class MockTelemetrySource : ITelemetrySource
             TyreContactHeading = new float[12],
             LocalVelocity = new float[3],
             Tc = 0.2f, Abs = 0.3f, BrakeBias = 0.58f,
+            // Delta wie AC's performanceMeter (Sekunden): pendelt über die Runde zwischen ca. −0,6 und +0,6 s
+            PerformanceMeter = 0.6f * MathF.Sin(pos * MathF.PI * 2 + _laps * 1.7f),
             AirTemp = 24, RoadTemp = 32,
         };
 
@@ -164,7 +188,7 @@ public sealed class MockTelemetrySource : ITelemetrySource
             PacketId = _packet,
             Status = AcStatus.Live,
             Session = AcSessionType.Practice,
-            CurrentTime = "", LastTime = "", BestTime = "", Split = "", TyreCompound = "Semislick",
+            CurrentTime = "", LastTime = "", BestTime = "", Split = "", TyreCompound = "Hard (C1)",
             CompletedLaps = _laps,
             Position = 1,
             ICurrentTime = (int)_lapTime,

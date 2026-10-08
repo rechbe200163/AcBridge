@@ -20,14 +20,15 @@ public record TyreData(
     Wheels Wear,          // 0–100 (100 = neu)
     Wheels Slip,
     Wheels Load,          // N
-    string Compound);
+    string Compound,
+    int? CompoundIndex);  // Index in SessionInfo.CarPhysics.TyreCompounds (null = unbekannt)
 
 public record LapData(
     int CompletedLaps,
     int Position,
     int CurrentLapMs,
     int LastLapMs,
-    int BestLapMs,
+    int BestLapMs,        // von AC; wenn AC 0 liefert (z. B. Hotlap): beste gültige Runde, die die Bridge gemessen hat
     int CurrentSector,
     int LastSectorMs,
     int NumberOfLaps,
@@ -68,7 +69,25 @@ public record TelemetryFrame(
     float RoadTemp,
     float SurfaceGrip,
     float[] CarDamage,
-    MiniSectorData MiniSectors);
+    MiniSectorData MiniSectors,
+    SectorData Sectors);
+
+/// <summary>
+/// Echte AC-Sektoren (meist 3), alle Zeiten in ms. Array-Index = Sektor (0 = S1).
+/// CurrentLap[i] / LastLap[i] / Best[i] = null → (noch) kein Wert.
+/// Results wie bei den Minisektoren: purple | green | yellow | neutral | pending
+/// </summary>
+public record SectorData(
+    int Count,
+    int Current,                 // aktueller Sektor (0-basiert)
+    int? CurrentRunningMs,       // läuft gerade im aktuellen Sektor (null = Sektorstart nicht gesehen)
+    int?[] CurrentLap,           // fertige Sektoren der laufenden Runde
+    string[] CurrentResults,
+    int?[] LastLap,              // komplette letzte Runde (leer, wenn es noch keine gibt)
+    string[] LastLapResults,
+    int?[] Best,                 // beste Zeit je Sektor in dieser Session (nur gültige Runden)
+    int?[] BestLap,              // Sektoren der besten Runde (Rundenzeit: Lap.BestLapMs)
+    int? TheoreticalBestMs);     // Summe der besten Sektoren
 
 /// <summary>
 /// Minisektoren der aktuellen Runde.
@@ -77,7 +96,6 @@ public record TelemetryFrame(
 ///   solo : "purple" eigener Bestwert | "green" schneller als eigene beste Runde | "yellow" langsamer
 ///   field: "purple" Feld-Bestwert    | "green" eigener Bestwert              | "yellow" langsamer
 ///   beide: "neutral" gefahren, noch kein Vergleichswert | "pending" noch nicht gefahren
-/// ReferenceLapMs: beste gültige Runde dieser Session (Vergleich für die Minisektoren)
 /// Das Live-Delta steht in Lap.AcDeltaMs (direkt von AC).
 /// </summary>
 public record MiniSectorData(
@@ -85,7 +103,6 @@ public record MiniSectorData(
     int Current,
     string[] Results,
     string[] LastLapResults,   // komplett gefärbte letzte Runde (leer, wenn es keine gibt)
-    int? ReferenceLapMs,
     bool LapValid,
     string Mode,
     int FieldCars);            // Anzahl anderer Autos auf der Strecke
@@ -111,7 +128,31 @@ public record SessionInfo(
     bool IsTimedRace,
     float FuelRate,
     float TyreRate,
-    float DamageRate);
+    float DamageRate,
+    CarPhysics? CarPhysics);   // aus den Autodateien, null wenn nicht lesbar
+
+/// <summary>Temperaturfenster aus einer AC-Performance-Kurve (°C).</summary>
+/// <param name="PeakC">maximaler Grip / maximale Bremswirkung</param>
+/// <param name="OptimalMinC">ab hier ≥ 99,5 % vom Maximum (grün)</param>
+/// <param name="OkMinC">ab hier ≥ 98 % vom Maximum</param>
+public record TempWindow(int PeakC, int OptimalMinC, int OptimalMaxC, int OkMinC, int OkMaxC);
+
+public record TyreCompoundInfo(
+    int Index,
+    string Name,
+    string ShortName,
+    TempWindow? Front,
+    TempWindow? Rear,
+    float? IdealPressureFront,   // psi
+    float? IdealPressureRear);
+
+/// <summary>null pro Achse = Auto hat dort kein Bremstemperatur-Modell.</summary>
+public record BrakeWindows(TempWindow? Front, TempWindow? Rear);
+
+public record CarPhysics(IReadOnlyList<TyreCompoundInfo> TyreCompounds, BrakeWindows? Brakes)
+{
+    public static readonly CarPhysics Empty = new([], null);
+}
 
 public record BridgeStatus(
     bool Connected,
