@@ -8,6 +8,7 @@ var options = builder.Configuration.GetSection("Telemetry").Get<TelemetryOptions
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton<TelemetryStore>();
 builder.Services.AddSingleton<TelemetryWebSocket>();
+builder.Services.AddSingleton<TrackOutlineStore>();
 var source = CreateSource(options.Source);
 builder.Services.AddSingleton(source);
 // Daten aller Autos: echte In-Game-App bei Shared Memory, simulierte KI beim Mock
@@ -51,8 +52,15 @@ api.MapGet("/telemetry", (TelemetryStore store) =>
 api.MapGet("/car/{car}", (string car, CarDataService carData) =>
     carData.Get(car) is { } c ? Results.Ok(c) : Results.NotFound());
 
+// Streckenumriss (aufgezeichnet aus einer gültigen Runde): aktuelle Strecke bzw. beliebige Strecke
+api.MapGet("/track", (TelemetryStore store, TrackOutlineStore outlines) =>
+    store.Session is { } s && outlines.Load(s.Track, s.TrackConfiguration) is { } o ? Results.Ok(o) : Results.NotFound());
+
+api.MapGet("/track/{track}", (string track, string? layout, TrackOutlineStore outlines) =>
+    outlines.Load(track, layout ?? "") is { } o ? Results.Ok(o) : Results.NotFound());
+
 app.MapGet("/", () => Results.Text(
-    "AC Bridge läuft.\n\nLIVE /live   (Testseite im Browser)\nWS   /ws/telemetry?hz=30\nGET  /api/status\nGET  /api/session\nGET  /api/telemetry\nGET  /api/car/{auto}\n"));
+    "AC Bridge läuft.\n\nLIVE /live   (Testseite im Browser)\nWS   /ws/telemetry?hz=30\nGET  /api/status\nGET  /api/session\nGET  /api/telemetry\nGET  /api/car/{auto}\nGET  /api/track   (oder /api/track/{strecke}?layout=…)\n"));
 
 app.MapGet("/live", () => Results.Content(LivePage.Html, "text/html; charset=utf-8"));
 

@@ -67,6 +67,7 @@ public sealed class TelemetryPoller(
     TelemetryStore store,
     TelemetryOptions options,
     CarDataService carData,
+    TrackOutlineStore trackOutlines,
     ILogger<TelemetryPoller> log) : BackgroundService
 {
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
@@ -87,6 +88,7 @@ public sealed class TelemetryPoller(
         var field = new FieldTracker(options.MiniSectors);
         var miniSectors = new MiniSectorTracker(options.MiniSectors) { Field = field };
         var sectors = new SectorTracker(3);
+        var trackRecorder = new TrackRecorder(trackOutlines, log);
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var fieldWasActive = false;
         string? lastCompound = null;
@@ -121,6 +123,7 @@ public sealed class TelemetryPoller(
                         miniSectors.Reset();
                         field.Reset();
                         sectors = new SectorTracker(store.Session?.SectorCount is > 0 and var n ? n : 3);
+                        trackRecorder.Reset(store.Session);
                     }   // anderes Auto / andere Strecke → neu
                 }
 
@@ -137,6 +140,7 @@ public sealed class TelemetryPoller(
                     }
                     var mini = miniSectors.Update(raw);
                     var sectorData = sectors.Update(raw);
+                    trackRecorder.Update(raw);
                     var compound = raw.Graphics.TyreCompound;
                     if (compound != lastCompound || store.Session?.CarPhysics != lastPhysics)
                     {
