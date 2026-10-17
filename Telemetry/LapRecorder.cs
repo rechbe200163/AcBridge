@@ -34,6 +34,7 @@ public sealed class LapRecorder(CloudOutbox outbox, ILogger log)
     private double _prevClock = double.NaN, _lastLineMs = double.NegativeInfinity;
     private readonly List<float> _distM = [], _s = [], _speed = [], _throttle = [], _brake = [], _steer = [], _x = [], _z = [];
     private readonly List<int> _timeMs = [], _gear = [];
+    private PendingLap? _pending;
 
     public void StartSession(SessionInfo? session, bool cloudEnabled)
     {
@@ -44,6 +45,7 @@ public sealed class LapRecorder(CloudOutbox outbox, ILogger log)
         _lapCount = 0;
         _bestLapMs = null;
         _recording = false;
+        _pending = null;
         _prevLaps = -1;
         _lastLineMs = double.NegativeInfinity;
         Clear();
@@ -65,7 +67,8 @@ public sealed class LapRecorder(CloudOutbox outbox, ILogger log)
         if ((lapCounted || clockReset) && now - _lastLineMs > LineDebounceMs)
         {
             _lastLineMs = now;
-            if (_recording) Finish(EstimateLapMs(time, now, sectors), sectors, g.TyreCompound, g.Session);
+            if (_pending is not null) Enqueue(_pending, sectors);   // falls die vorige noch wartet
+            _pending = _recording ? Freeze(EstimateLapMs(time, now), now, g) : null;
             Clear();
             _recording = true;
             _valid = true;
@@ -73,6 +76,15 @@ public sealed class LapRecorder(CloudOutbox outbox, ILogger log)
         _prevLaps = g.CompletedLaps;
         _prevTime = time;
         _prevClock = now;
+
+        // Abgeschlossene Runde wartet kurz, bis AC Rundenzeit und Sektoren nachgezogen hat
+        if (_pending is { } pend && (now >= pend.ReadyAtMs || SectorsFit(pend, sectors) && g.ILastTime != pend.LastTimeBefore && now >= pend.MinReadyMs))
+        {
+            if (g.ILastTime > 0 && g.ILastTime != pend.LastTimeBefore && Math.Abs(g.ILastTime - pend.LapMs) < 300)
+                pend = pend with { LapMs = g.ILastTime };              // exakte Zeit von AC
+            Enqueue(pend, sectors);
+            _pending = null;
+        }
 
         if (!_recording) return;
         if (p.NumberOfTyresOut > 2 || g.IsInPit != 0 || g.IsInPitLane != 0) _valid = false;
@@ -105,26 +117,28 @@ public sealed class LapRecorder(CloudOutbox outbox, ILogger log)
         _z.Add(MathF.Round(z, 1));
     }
 
-    private void Finish(int lapMs, SectorData sectors, string? compound, AcSessionType sessionType)
+    /// <summary>Fertige Runde, die noch auf AC's Rundenzeit / Sektoren wartet.</summary>
+    private sealed record PendingLap(
+        int LapMs, bool Valid, string? Compound, AcSessionType SessionType, int LastTimeBefore,
+        double MinReadyMs, double ReadyAtMs, Dictionary<string, object> Channels, int Points);
+
+    /// <summary>
+    /// Runde an der Linie einfrieren. Nur vollständige Runden: von der Linie bis zur Linie,
+    /// Spline-Position deckt die ganze Runde ab. Restart mitten in der Runde oder die Anfahrt
+    /// im Hotlap-Modus (Start kurz vor der Linie) fallen hier raus.
+    /// </summary>
+    private PendingLap? Freeze(int lapMs, double now, AcGraphics g)
     {
-        if (_session is null || lapMs <= 0 || _distM.Count < 50) return;
+        if (_session is null || lapMs <= 0 || _distM.Count < 50) return Discard("zu kurz");
+        if (_s[0] is > 0.05f and < 0.97f) return Discard($"Start bei s={_s[0]:0.00}, nicht an der Linie");
+        var buckets = new bool[20];
+        foreach (var s in _s) buckets[Math.Clamp((int)(s * 20), 0, 19)] = true;
+        if (buckets.Any(b => !b)) return Discard("Runde unvollständig (Restart?)");
 
-        _lapCount++;
-        if (_valid && (_bestLapMs is null || lapMs < _bestLapMs)) _bestLapMs = lapMs;
-
-        var lapId = Guid.NewGuid();
-        // Sektoren nur übernehmen, wenn sie zu dieser Runde passen (Summe ≈ Rundenzeit)
-        var sectorMs = sectors.LastLap.Length > 0 && sectors.LastLap.All(v => v is not null)
-                       && Math.Abs(sectors.LastLap.Sum(v => v!.Value) - lapMs) < 300
-            ? sectors.LastLap.Select(v => v!.Value).ToArray()
-            : [];
-
-        outbox.Enqueue(new UploadJob(
-            Kind: "lap",
-            Session: new SessionRow(_sessionId, _session.Track, _session.TrackConfiguration, _session.Car,
-                sessionType.ToString().ToLowerInvariant(), _startedAt, _bestLapMs, _lapCount),
-            Lap: new LapRow(lapId, _sessionId, _lapCount, lapMs, sectorMs, _valid, compound, DateTimeOffset.Now),
-            Trace: new LapTraceRow(lapId, SpacingM, new Dictionary<string, object>
+        return new PendingLap(lapMs, _valid, g.TyreCompound, g.Session, g.ILastTime,
+            MinReadyMs: now + 1600,   // SectorTracker korrigiert den letzten Sektor bis 1,5 s nach der Linie
+            ReadyAtMs: now + 3000,    // spätestens dann hochladen, auch ohne Sektoren
+            new Dictionary<string, object>
             {
                 ["distM"] = _distM.ToArray(),
                 ["s"] = _s.ToArray(),
@@ -136,23 +150,44 @@ public sealed class LapRecorder(CloudOutbox outbox, ILogger log)
                 ["steer"] = _steer.ToArray(),
                 ["x"] = _x.ToArray(),
                 ["z"] = _z.ToArray(),
-            })));
+            },
+            _distM.Count);
 
-        log.LogInformation("Runde {Lap} aufgezeichnet: {Ms} ms, {Count} Punkte, {Valid}",
-            _lapCount, lapMs, _distM.Count, _valid ? "gültig" : "ungültig");
-    }
-
-    /// <summary>Sektorsumme, wenn vollständig (exakt von AC), sonst aus der Rundenuhr geschätzt.</summary>
-    private int EstimateLapMs(int newLapTime, double now, SectorData sectors)
-    {
-        var estimate = _prevTime + (int)Math.Max(0, (now - _prevClock) - newLapTime);
-        if (sectors.LastLap.Length > 0 && sectors.LastLap.All(v => v is not null))
+        PendingLap? Discard(string why)
         {
-            var sum = sectors.LastLap.Sum(v => v!.Value);
-            if (Math.Abs(sum - estimate) < 300) return sum;
+            log.LogInformation("Runde nicht hochgeladen: {Why}", why);
+            return null;
         }
-        return estimate;
     }
+
+    /// <summary>Sektoren gehören zu dieser Runde, wenn alle da sind und ihre Summe zur Rundenzeit passt.</summary>
+    private static bool SectorsFit(PendingLap lap, SectorData sectors) =>
+        sectors.LastLap.Length > 0 && sectors.LastLap.All(v => v is not null)
+        && Math.Abs(sectors.LastLap.Sum(v => v!.Value) - lap.LapMs) < 300;
+
+    private void Enqueue(PendingLap lap, SectorData sectors)
+    {
+        var sectorMs = SectorsFit(lap, sectors) ? sectors.LastLap.Select(v => v!.Value).ToArray() : [];
+        var lapMs = sectorMs.Length > 0 && Math.Abs(sectorMs.Sum() - lap.LapMs) < 50 ? sectorMs.Sum() : lap.LapMs;
+
+        _lapCount++;
+        if (lap.Valid && (_bestLapMs is null || lapMs < _bestLapMs)) _bestLapMs = lapMs;
+
+        var lapId = Guid.NewGuid();
+        outbox.Enqueue(new UploadJob(
+            Kind: "lap",
+            Session: new SessionRow(_sessionId, _session!.Track, _session.TrackConfiguration, _session.Car,
+                lap.SessionType.ToString().ToLowerInvariant(), _startedAt, _bestLapMs, _lapCount),
+            Lap: new LapRow(lapId, _sessionId, _lapCount, lapMs, sectorMs, lap.Valid, lap.Compound, DateTimeOffset.Now),
+            Trace: new LapTraceRow(lapId, SpacingM, lap.Channels)));
+
+        log.LogInformation("Runde {Lap} aufgezeichnet: {Ms} ms, {Count} Punkte, {Valid}, Sektoren {Sectors}",
+            _lapCount, lapMs, lap.Points, lap.Valid ? "gültig" : "ungültig", sectorMs.Length > 0 ? "ok" : "fehlen");
+    }
+
+    /// <summary>Rundenzeit aus der Rundenuhr geschätzt; wird später durch AC's iLastTime ersetzt.</summary>
+    private int EstimateLapMs(int newLapTime, double now) =>
+        _prevTime + (int)Math.Max(0, (now - _prevClock) - newLapTime);
 
     private void Clear()
     {
