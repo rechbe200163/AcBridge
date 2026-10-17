@@ -1,4 +1,5 @@
 using AcBridge.Models;
+using AcBridge.Cloud;
 using AcBridge.Telemetry.CarData;
 
 namespace AcBridge.Telemetry;
@@ -67,6 +68,9 @@ public sealed class TelemetryPoller(
     TelemetryStore store,
     TelemetryOptions options,
     CarDataService carData,
+    TrackOutlineStore trackOutlines,
+    CloudOutbox outbox,
+    CloudOptions cloud,
     ILogger<TelemetryPoller> log) : BackgroundService
 {
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
@@ -87,6 +91,14 @@ public sealed class TelemetryPoller(
         var field = new FieldTracker(options.MiniSectors);
         var miniSectors = new MiniSectorTracker(options.MiniSectors) { Field = field };
         var sectors = new SectorTracker(3);
+        var lapRecorder = new LapRecorder(outbox, log);
+        var uploadedTracks = new HashSet<string>();
+        void UploadTrack(TrackOutline o)
+        {
+            if (!cloud.Enabled || !uploadedTracks.Add($"{o.Track}|{o.Layout}")) return;
+            outbox.Enqueue(new UploadJob("track", Track: o, Corners: CornerDetector.Detect(o.Points)));
+        }
+        var trackRecorder = new TrackRecorder(trackOutlines, log) { Saved = UploadTrack };
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var fieldWasActive = false;
         string? lastCompound = null;
@@ -121,6 +133,11 @@ public sealed class TelemetryPoller(
                         miniSectors.Reset();
                         field.Reset();
                         sectors = new SectorTracker(store.Session?.SectorCount is > 0 and var n ? n : 3);
+                        trackRecorder.Reset(store.Session);
+                        lapRecorder.StartSession(store.Session, cloud.Enabled);
+                        // schon vorhandener Umriss (z. B. vor dem Cloud-Upload aufgezeichnet) → einmal hochladen
+                        if (store.Session is { } ses && trackOutlines.Load(ses.Track, ses.TrackConfiguration) is { } existing)
+                            UploadTrack(existing);
                     }   // anderes Auto / andere Strecke → neu
                 }
 
@@ -137,6 +154,8 @@ public sealed class TelemetryPoller(
                     }
                     var mini = miniSectors.Update(raw);
                     var sectorData = sectors.Update(raw);
+                    trackRecorder.Update(raw);
+                    lapRecorder.Update(raw, sectorData);
                     var compound = raw.Graphics.TyreCompound;
                     if (compound != lastCompound || store.Session?.CarPhysics != lastPhysics)
                     {
