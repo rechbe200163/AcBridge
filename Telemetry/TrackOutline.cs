@@ -73,6 +73,9 @@ public sealed class TrackRecorder(TrackOutlineStore store, ILogger log)
 
     private string _track = "", _layout = "", _car = "";
 
+    /// <summary>Wird aufgerufen, sobald ein neuer Umriss gespeichert wurde (z. B. für den Cloud-Upload).</summary>
+    public Action<TrackOutline>? Saved { get; set; }
+
     /// <summary>Bei neuer Session aufrufen.</summary>
     public void Reset(SessionInfo? session)
     {
@@ -135,6 +138,7 @@ public sealed class TrackRecorder(TrackOutlineStore store, ILogger log)
         var outline = new TrackOutline(_track, _layout, _car, lapMs, DateTimeOffset.Now, [.. _points]);
         store.Save(outline);
         _done = true;
+        Saved?.Invoke(outline);
         log.LogInformation("Streckenumriss gespeichert: {Track} {Layout}, {Count} Punkte → {Dir}",
             _track, _layout, _points.Count, store.Directory);
         return true;

@@ -1,14 +1,22 @@
 using AcBridge;
 using AcBridge.Telemetry;
+using AcBridge.Cloud;
 using AcBridge.Telemetry.CarData;
 
 var builder = WebApplication.CreateBuilder(args);
+// Geheimnisse (Supabase Secret Key) gehören nicht ins Git → appsettings.Local.json (steht in .gitignore)
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: false);
 
 var options = builder.Configuration.GetSection("Telemetry").Get<TelemetryOptions>() ?? new();
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton<TelemetryStore>();
 builder.Services.AddSingleton<TelemetryWebSocket>();
 builder.Services.AddSingleton<TrackOutlineStore>();
+var cloud = builder.Configuration.GetSection("Cloud").Get<CloudOptions>() ?? new();
+builder.Services.AddSingleton(cloud);
+builder.Services.AddSingleton<CloudOutbox>();
+builder.Services.AddHttpClient<SupabaseRest>(c => c.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHostedService<CloudUploader>();
 var source = CreateSource(options.Source);
 builder.Services.AddSingleton(source);
 // Daten aller Autos: echte In-Game-App bei Shared Memory, simulierte KI beim Mock
