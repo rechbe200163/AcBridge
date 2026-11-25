@@ -73,6 +73,21 @@ public sealed class SupabaseRest(HttpClient http, CloudOptions options)
         return await SendAsync(req, ct);
     }
 
+    /// <summary>
+    /// Realtime Broadcast über die REST-API: kurze Nachricht an alle, die den Kanal abonniert haben.
+    /// Geht nicht durch die Datenbank → kein Publication-Setup, kleine Payload.
+    /// </summary>
+    public async Task BroadcastAsync(string topic, string @event, object payload, CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Post, $"{options.SupabaseUrl.TrimEnd('/')}/realtime/v1/api/broadcast");
+        req.Headers.Add("apikey", options.SecretKey);
+        if (options.SecretKey.StartsWith("eyJ"))
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.SecretKey);
+        var body = new { messages = new[] { new { topic, @event, payload } } };
+        req.Content = new StringContent(JsonSerializer.Serialize(body, CloudOutbox.Json), Encoding.UTF8, "application/json");
+        await SendAsync(req, ct);
+    }
+
     public async Task DeleteAsync(string table, string filter, CancellationToken ct)
     {
         using var req = Request(HttpMethod.Delete, $"{table}?{filter}");
@@ -104,6 +119,9 @@ public sealed class CloudUploader(CloudOutbox outbox, SupabaseRest rest, CloudOp
 {
     private static readonly TimeSpan Idle = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan Backoff = TimeSpan.FromSeconds(60);
+
+    /// <summary>Realtime-Kanal, auf dem jede fertig hochgeladene Runde gemeldet wird.</summary>
+    public const string LapsTopic = "laps";
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -151,6 +169,22 @@ public sealed class CloudUploader(CloudOutbox outbox, SupabaseRest rest, CloudOp
                 await rest.UpsertAsync("lap_traces", new[] { trace }, "lap_id", ct);
                 log.LogInformation("Runde {Lap} hochgeladen ({Ms} ms, {Valid})",
                     lap.LapNumber, lap.LapMs, lap.Valid ? "gültig" : "ungültig");
+
+                // Erst jetzt melden: Runde UND Messspur sind gespeichert → Client kann sofort laden
+                try
+                {
+                    await rest.BroadcastAsync(LapsTopic, "lap_uploaded", new
+                    {
+                        lap_id = lap.Id, session_id = s.Id, lap_number = lap.LapNumber, lap_ms = lap.LapMs,
+                        sector_ms = lap.SectorMs, valid = lap.Valid,
+                        track = s.Track, layout = s.Layout, car = s.Car,
+                    }, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Runde ist trotzdem gespeichert → nicht erneut hochladen, nur warnen
+                    log.LogWarning("Realtime-Meldung für Runde {Lap} fehlgeschlagen: {Msg}", lap.LapNumber, ex.Message);
+                }
                 break;
 
             case "track" when job.Track is { } t:
